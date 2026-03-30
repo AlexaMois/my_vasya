@@ -1,0 +1,261 @@
+Полный аудит репозитория my_vasya
+Дата: 2026-03-30
+Репозиторий: alexamois/my_vasya
+
+1. СТРУКТУРА И КАЧЕСТВО
+1.1 Описание продукта
+my_vasya — Telegram-бот «ИИ-Вася Секретарь», персональный ассистент для малого бизнеса (агентство «НейроРешение»). Бот предоставляет 5 основных функций:
+
+Заметки — сохранение, поиск и удаление заметок через Google Sheets
+Календарь — создание событий в Google Calendar из естественного языка
+Google-таблицы — поиск и анализ данных в Google Sheets с помощью LLM
+Юрист — анализ юридических документов (PDF/DOCX) через OpenAI Assistants API
+Визитки — распознавание фото визиток (GPT-4o Vision) и сохранение контактов в таблицу
+1.2 Стек технологий
+Компонент	Технология
+Язык	Python 3.12
+Telegram-фреймворк	aiogram 3.21+
+LLM-провайдеры	OpenAI (GPT-4o, Whisper), Mistral, Together.ai, OpenRouter, Opper (Gemini), ComBox
+Google API	google-api-python-client, gspread
+Планировщик	APScheduler
+Обработка документов	pypdf, python-docx
+Данные	pandas, Google Sheets как БД
+1.3 Карта файлов
+notebook_srv/
+├── main.py                          # Точка входа: инициализация бота, диспетчер, фильтры
+├── llm_choise.py                    # Абстракция LLM: 7 классов провайдеров + LLM_union (fallback)
+├── handlers/
+│   ├── start.py                     # Обработка /start, создание директорий пользователя
+│   └── common.py                    # ВСЯ бизнес-логика (919 строк, God Object)
+├── states/states.py                 # FSM-состояния: Notes, Calendar, GoogleSheets, Lawyer, Card
+├── filters/allowed_users.py         # Авторизация по whitelist (файл allowed_users.txt)
+├── keyboards/
+│   ├── reply_keyboards.py           # Кнопки главного меню (5 режимов)
+│   └── inline_keyboards.py          # Inline-кнопки для каждого режима
+├── google_sheets/get_sheet.py       # CRUD-операции с Google Sheets
+├── notifications/
+│   ├── calendar_notify.py           # Ежедневная рассылка событий (9:00)
+│   └── notes_notify.py              # Еженедельный анализ заметок (пт 13:00)
+├── texts_and_prompts/               # Системные промпты для LLM
+├── utils/restricted_symbols.py      # Санитизация текста
+├── users/                           # Данные пользователей (файловая система)
+└── config_dir/
+    ├── config.env                   # Переменные окружения (с секретами!)
+    ├── allowed_users.txt            # Whitelist (4 пользователя)
+    └── victoria_calendar_creds.json # Google Service Account
+
+1.4 Связи между модулями
+main.py
+  ├── handlers/start.py      → keyboards/reply_keyboards.py
+  ├── handlers/common.py     → llm_choise.py (LLM-запросы)
+  │                          → google_sheets/get_sheet.py (данные)
+  │                          → keyboards/inline_keyboards.py
+  │                          → states/states.py (FSM)
+  │                          → utils/restricted_symbols.py
+  │                          → openai (Whisper, GPT-4o Vision, Assistants)
+  │                          → google calendar API
+  └── filters/allowed_users.py
+
+notifications/calendar_notify.py  → google calendar API, aiogram Bot (отдельный процесс)
+notifications/notes_notify.py     → ComBox API, aiogram Bot (отдельный процесс)
+
+1.5 Оценка качества кода: 3/10
+Обоснование:
+
+Критерий	Оценка	Комментарий
+Архитектура	2/10	God Object в common.py (919 строк), нет разделения ответственности
+Именование	4/10	Дублированные имена функций (create_event_input x3, lawyer_cancellation x2, choosing_table x2), файл llm_choise.py (опечатка: choice)
+DRY	2/10	Код формирования истории скопирован 3+ раз, распознавание визиток дублировано, LLM-классы на 90% идентичны
+Безопасность	1/10	API-ключи захардкожены прямо в коде, токены в git
+Обработка ошибок	3/10	Bare except: в ComBox, generic Exception повсюду, ошибки возвращаются пользователю с техническими деталями
+Документация	2/10	README пустой, docstrings минимальны
+Тесты	0/10	Тесты полностью отсутствуют
+Типизация	2/10	Нет type hints, нет валидации данных
+2. БЕЗОПАСНОСТЬ
+2.1 Критические уязвимости
+SEC-01: Хардкод API-ключей и токенов в исходном коде
+Тип: Exposure of Sensitive Information (CWE-798)
+Критичность: CRITICAL
+Файлы и строки:
+config_dir/config.env — BOT_TOKEN, OPENAI_TOKEN, LAWYER_ID
+llm_choise.py:303 — Mistral API key
+llm_choise.py:400 — Together.ai API key
+llm_choise.py:505 — OpenRouter API key
+llm_choise.py:604 — Opper API key
+llm_choise.py:696 — OpenAI API key (+ закомментированный второй ключ на строке 697)
+notifications/calendar_notify.py:32 — другой Bot Token
+notifications/notes_notify.py:51 — третий Bot Token
+Импакт: Полная компрометация всех API-аккаунтов. Злоумышленник получает доступ к OpenAI, Google Calendar, Google Sheets, Telegram-ботам, всем LLM-сервисам.
+Исправление:
+Немедленно ротировать ВСЕ ключи — считать их скомпрометированными
+Вынести все секреты в переменные окружения
+Добавить config_dir/config.env и *.json (credentials) в .gitignore
+Использовать .env.example с плейсхолдерами
+SEC-02: Google Service Account credentials в репозитории
+Тип: Exposure of Sensitive Information (CWE-798)
+Критичность: CRITICAL
+Файл: config_dir/victoria_calendar_creds.json
+Импакт: Полный доступ к Google Calendar и Google Sheets аккаунта
+Исправление: Удалить из репозитория, ротировать ключ сервисного аккаунта, добавить в .gitignore
+SEC-03: Отсутствие .gitignore
+Тип: Information Exposure (CWE-200)
+Критичность: HIGH
+Импакт: Все секреты, кэши, пользовательские данные попадают в git
+Исправление: Создать .gitignore с правилами для *.env, *.json (creds), __pycache__/, users/, buff_*/, .idea/
+2.2 Высокие уязвимости
+SEC-04: Утечка технических деталей в сообщениях об ошибках
+Тип: Information Exposure Through Error Messages (CWE-209)
+Критичность: HIGH
+Примеры:
+common.py:132 — f'Ошибка в заметках: {e}'
+common.py:265 — f'Ошибка в режиме заметок: {e}'
+common.py:380 — f'Ошибка при подтверждении события: {e}'
+Всего 12+ мест с прямым выводом исключений пользователю
+Импакт: Stack traces, имена файлов, пути к конфигурации — раскрывается внутренняя структура
+Исправление: Логировать ошибки через logging, пользователю показывать generic-сообщения
+SEC-05: Path Traversal через username
+Тип: Path Traversal (CWE-22)
+Критичность: HIGH
+Примеры:
+common.py:223 — 'users/' + msg.from_user.username + '/llm_context/context.txt'
+common.py:472 — f'users/{msg.from_user.username}/lawyer_sdocs/'
+Импакт: Telegram username не валидируется. Теоретически возможен выход за пределы директории users/
+Исправление: Валидировать username (только [a-zA-Z0-9_]), использовать Path.resolve() с проверкой базового пути
+SEC-06: Файлы не закрываются корректно (утечка ресурсов)
+Тип: Improper Resource Shutdown (CWE-404)
+Критичность: MEDIUM
+Примеры:
+filters/allowed_users.py:8 — open(self.path).read() без with
+common.py:236 — open("texts_and_prompts/...").read() без with
+common.py:238 — open(history_path, 'r').read() без with
+common.py:254-260 — open(..., 'a') + .close() вместо with
+notifications/notes_notify.py:19 — open(...).read() без with
+Исправление: Использовать with open() as f: повсеместно
+SEC-07: Отсутствие rate limiting
+Тип: Uncontrolled Resource Consumption (CWE-400)
+Критичность: MEDIUM
+Импакт: Авторизованный пользователь может генерировать неограниченное количество запросов к LLM API, Google API
+Исправление: Добавить aiogram.utils.throttling или middleware с rate limit
+SEC-08: Данные пользователей хранятся без шифрования
+Тип: Cleartext Storage of Sensitive Information (CWE-312)
+Критичность: MEDIUM
+Файлы: users/*/llm_context/context.txt, users/*/saved_notes/notes.txt, users/*/lawyer_sdocs/
+Импакт: Любой с доступом к серверу читает всю переписку и юридические документы
+Исправление: Шифрование at-rest для пользовательских данных
+2.3 Низкие уязвимости
+SEC-09: Bare except в ComBox
+Тип: Improper Error Handling (CWE-755)
+Критичность: LOW
+Файл: llm_choise.py:53 — except: без указания типа исключения
+Исправление: Указать конкретные типы исключений
+SEC-10: Hardcoded chat_id в notifications
+Тип: Hardcoded Configuration (CWE-798)
+Критичность: LOW
+Файлы:
+notifications/calendar_notify.py:31 — chat_id = '1078606712'
+notifications/notes_notify.py:47 — chat_id = '1078606712'
+Исправление: Вынести в конфигурацию
+3. ПРОИЗВОДИТЕЛЬНОСТЬ И АРХИТЕКТУРА
+3.1 Узкие места
+PERF-01: Блокирующие вызовы в асинхронном коде
+Критичность: HIGH
+Проблема: time.sleep(0.5) в async-контексте (common.py:564, 618) блокирует event loop при ожидании OpenAI Assistants Run
+Файлы: common.py:564, common.py:618
+# Текущий код (БЛОКИРУЕТ весь бот):
+while run.status in ("queued", "in_progress"):
+    time.sleep(0.5)  # БЛОКИРУЮЩИЙ вызов!
+    run = openai_client.beta.threads.runs.retrieve(...)
+
+Исправление:
+# Правильный вариант:
+while run.status in ("queued", "in_progress"):
+    await asyncio.sleep(0.5)
+    run = await asyncio.to_thread(
+        openai_client.beta.threads.runs.retrieve,
+        thread_id=thread_id, run_id=run.id
+    )
+
+PERF-02: Синхронные HTTP-запросы в LLM-классах
+Критичность: HIGH
+Проблема: Все LLM-классы используют requests.post() — синхронные вызовы, блокирующие event loop
+Файл: llm_choise.py — весь файл
+Импакт: Бот перестаёт отвечать всем пользователям во время LLM-запроса (до 120 секунд)
+Исправление: Использовать aiohttp или httpx с async, либо оборачивать в asyncio.to_thread()
+PERF-03: sleep(1) в LLM_union между запросами
+Критичность: MEDIUM
+Файл: llm_choise.py:796,804,814,825,835
+Проблема: В LLM_union вызывается sleep(1) после каждого успешного запроса — замедляет каждый ответ на 1 секунду без причины
+Исправление: Удалить sleep(1) — это не throttling, а просто задержка
+PERF-04: Полная загрузка Google Sheets при каждом запросе
+Критичность: MEDIUM
+Файл: google_sheets/get_sheet.py:46 — sheet_by_name.get_all_values()
+Проблема: Каждый запрос к таблице загружает ВСЕ данные, даже если нужна одна строка
+Импакт: При росте данных — линейное замедление, увеличение расхода токенов LLM (вся таблица идёт в промпт)
+Исправление: Кэширование с TTL, пагинация, загрузка только нужных диапазонов
+PERF-05: Дублированное формирование истории
+Критичность: MEDIUM
+Файлы: common.py:238-248, common.py:410-418 (идентичный блок)
+Проблема: Один и тот же код парсинга истории скопирован 2+ раз. Каждый раз читается весь файл, парсится вручную строка за строкой в JSON
+Исправление: Вынести в отдельную функцию build_history(username), хранить историю в JSON-формате
+PERF-06: Проверка доступности LLM через реальные запросы
+Критичность: LOW
+Файл: llm_choise.py — методы is_server_available() во всех классах
+Проблема: Для проверки доступности отправляется полноценный запрос к LLM. Это медленно и тратит токены
+Исправление: Использовать health-check endpoints или HEAD-запросы где возможно
+3.2 Архитектурные проблемы
+ARCH-01: God Object — handlers/common.py
+Проблема: 919 строк, содержит ВСЮ логику: заметки, календарь, таблицы, юрист, визитки
+Исправление: Разделить на отдельные модули по функциям (notes.py, calendar.py, sheets.py, lawyer.py, cards.py)
+ARCH-02: Отсутствие абстракции хранилища
+Проблема: Данные пользователей хранятся в плоских файлах с ручным парсингом (%%% как разделитель), а заметки — в Google Sheets. Нет единого интерфейса
+Исправление: Создать слой репозитория (Repository pattern) для унификации доступа к данным
+ARCH-03: Дублирование кода LLM-классов
+Проблема: 7 классов в llm_choise.py (838 строк) с ~90% идентичным кодом. Различаются только URL, ключ и имя модели
+Исправление: Базовый класс BaseLLM с конфигурацией через параметры:
+class BaseLLM:
+    def __init__(self, model, api_key, base_url):
+        self.client = OpenAI(base_url=base_url, api_key=api_key)
+    # Общие методы ask(), ask_json(), is_server_available()
+
+ARCH-04: Notifications как отдельные процессы
+Проблема: calendar_notify.py и notes_notify.py — standalone-скрипты с собственными Bot-инстансами и токенами. Запускаются отдельно, не интегрированы с основным ботом
+Исправление: Интегрировать APScheduler в основной event loop aiogram, использовать общий Bot-инстанс
+ARCH-05: Отсутствие graceful shutdown
+Проблема: Нет обработки сигналов завершения. При остановке бота — потеря данных в процессе записи
+Исправление: Обработка SIGTERM/SIGINT с корректным закрытием ресурсов
+ARCH-06: Глобальные переменные
+Проблема: gspread.authorize(creds) вызывается при импорте модуля (get_sheet.py:14). Глобальный client, глобальный llm — затрудняет тестирование и переиспользование
+Исправление: Dependency injection, ленивая инициализация
+ИТОГ: Приоритизированный список задач
+CRITICAL (немедленно)
+#	Задача	Тип	Ссылка
+1	Ротировать ВСЕ API-ключи и токены	Безопасность	SEC-01, SEC-02
+2	Вынести все секреты из кода в переменные окружения	Безопасность	SEC-01
+3	Создать .gitignore (.env, creds, pycache, users/, buff_/)	Безопасность	SEC-03
+4	Удалить из истории git файлы с секретами (git filter-branch / BFG)	Безопасность	SEC-01, SEC-02
+HIGH (в течение недели)
+#	Задача	Тип	Ссылка
+5	Заменить time.sleep() на asyncio.sleep() + asyncio.to_thread()	Производительность	PERF-01
+6	Заменить requests на aiohttp/httpx в LLM-классах	Производительность	PERF-02
+7	Убрать вывод технических ошибок пользователю, добавить logging	Безопасность	SEC-04
+8	Валидировать username перед использованием в путях	Безопасность	SEC-05
+9	Исправить незакрытые файловые дескрипторы (with open)	Безопасность	SEC-06
+MEDIUM (в течение месяца)
+#	Задача	Тип	Ссылка
+10	Разделить common.py на отдельные модули по функциям	Архитектура	ARCH-01
+11	Рефакторинг LLM-классов: базовый класс + конфигурация	Архитектура	ARCH-03
+12	Вынести формирование истории в отдельную функцию	Производительность	PERF-05
+13	Убрать sleep(1) из LLM_union	Производительность	PERF-03
+14	Интегрировать notifications в основной бот	Архитектура	ARCH-04
+15	Добавить rate limiting	Безопасность	SEC-07
+16	Добавить кэширование данных Google Sheets	Производительность	PERF-04
+LOW (бэклог)
+#	Задача	Тип	Ссылка
+17	Написать тесты (хотя бы для LLM-абстракции и обработки данных)	Качество	—
+18	Добавить type hints	Качество	—
+19	Исправить опечатку в имени файла: llm_choise.py → llm_choice.py	Качество	—
+20	Исправить дублирование имён функций	Качество	—
+21	Добавить graceful shutdown	Архитектура	ARCH-05
+22	Перевести хранение истории из %%%-формата в JSON	Архитектура	ARCH-02
+23	Шифрование пользовательских данных at-rest	Безопасность	SEC-08
+24	Добавить README с описанием проекта и инструкцией по запуску	Документация	—
