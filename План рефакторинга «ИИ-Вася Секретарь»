@@ -1,0 +1,165 @@
+План рефакторинга «ИИ-Вася Секретарь»
+Фаза 0: Подготовка (перед любым кодом)
+Ротация ВСЕХ ключей — считать все токены скомпрометированными:
+
+Telegram Bot Token (3 штуки: основной, calendar_notify, notes_notify)
+OpenAI API Key (+ закомментированный второй)
+Mistral API Key
+Together.ai API Key
+OpenRouter API Key
+Opper API Key
+Google Service Account — перевыпустить JSON-ключ
+Создать .gitignore до первого коммита новой структуры
+
+Очистить git-историю от секретов (BFG Repo-Cleaner или git filter-repo)
+
+Фаза 1: Новая структура проекта
+Текущая плоская структура notebook_srv/ → модульная:
+
+vasya_bot/
+├── main.py                       # Точка входа
+├── config.py                     # Единая загрузка настроек из .env
+├── .env.example                  # Шаблон переменных (без значений)
+│
+├── llm/
+│   ├── base.py                   # BaseLLM — единый базовый класс
+│   ├── providers.py              # Конфигурации провайдеров
+│   ├── union.py                  # LLM_union — fallback-цепочка
+│   └── utils.py                  # remove_think_tags(), clean_json_response()
+│
+├── handlers/
+│   ├── start.py                  # /start
+│   ├── common.py                 # try_mode_switch(), send_or_edit(), transcribe_voice()
+│   ├── notes.py                  # ~Заметки: запись, поиск, удаление
+│   ├── calendar.py               # ~Календарь: создание событий
+│   ├── sheets.py                 # ~Гугл-таблица: выбор листа, поиск
+│   └── cards.py                  # ~Визитка: распознавание, сохранение
+│                                 # (~Юрист — УДАЛЁН)
+│
+├── services/
+│   ├── bipium.py                 # Клиент Бипиум API (замена Google Sheets для заметок и визиток)
+│   ├── google_calendar.py        # Google Calendar API
+│   ├── google_sheets.py          # get_sheet_data() для ~Гугл-таблица (остаётся)
+│   └── openai_tools.py           # Whisper, GPT-4o Vision
+│
+├── notifications/
+│   └── scheduler.py              # APScheduler в основном event loop
+│
+├── states/
+│   └── states.py                 # FSM-состояния (без LawyerAssistant)
+│
+├── keyboards/
+│   ├── reply_keyboards.py        # Главное меню (без ~Юрист)
+│   └── inline_keyboards.py       # Inline-клавиатуры (без lawyer_*)
+│
+├── filters/
+│   └── allowed_users.py
+│
+├── texts_and_prompts/            # Промпты (без lawyer-промптов)
+│
+└── utils/
+    ├── restricted_symbols.py
+    └── history.py                # build_history() — парсинг %%%-истории
+
+Фаза 2: BaseLLM — один класс вместо семи
+Проблема
+7 классов в llm_choise.py (838 строк) с ~90% копипастой. Различия только в:
+
+MODEL, API_KEY, BASE_URL
+Способ инициализации клиента
+get_max_model_tokens()
+Решение
+BaseLLM — абстрактный базовый класс с ask(), ask_json(), is_server_available()
+OpenAICompatLLM(BaseLLM) — один подкласс для всех OpenAI-совместимых (Together, OpenRouter, Opper, OpenAI, LM Studio)
+MistralLLM(BaseLLM) — отдельный (Mistral SDK)
+ComBoxLLM(BaseLLM) — отдельный (REST без SDK)
+Результат: ~838 строк → ~150 строк
+
+Фаза 3: Разбиение God Object common.py
+Сейчас
+919 строк, 5 доменов в одном файле
+
+Разделение
+Файл	Содержимое	Строки
+handlers/common.py	send_or_edit(), try_mode_switch(), transcribe_voice(), MODE_SWITCHES	~50
+handlers/notes.py	write_notes, search_notes_mode, delete_notes_confirm	~160
+handlers/calendar.py	create_event_input, create_event_confirm	~80
+handlers/sheets.py	choosing_table, what_to_find	~70
+handlers/cards.py	card_input_1, card_input_2, no_card_comment, get_comments	~220
+utils/history.py	build_history(username) — общая функция	~30
+Устраняемое дублирование
+Парсинг %%%-истории (2 копии) → build_history()
+Распознавание визиток GPT-4o (2 копии) → openai_tools.recognize_card()
+Фаза 4: Удаление ~Юрист
+Удалить:
+
+LawyerAssistant из states.py
+Хендлеры: lawyer_docs(), lawyer_consulting() (~200 строк)
+Клавиатуры: lawyer_actions(), lawyer_docs_get_to_consulting(), lawyer_consulting_get_to_docs()
+Кнопка ~Юрист из reply_keyboards.py
+LAWYER_ID из .env
+Зависимости pypdf, python-docx из requirements.txt
+Функции extract_text_from_pdf(), extract_text_from_docx(), save_text_to_docx()
+Фаза 5: ~Заметки и ~Визитка → Бипиум API
+Сейчас
+Заметки → Google Sheets (лист «Заметки»)
+Визитки → Google Sheets (лист «Потенциальные клиенты»)
+После
+Заметки → Бипиум: каталог «Заметки»
+Визитки → Бипиум: каталог «Компании» / «Контакты»
+Реализация
+services/bipium.py — универсальный клиент:
+
+create_record(catalog_id, fields)
+get_records(catalog_id, filters)
+delete_record(catalog_id, record_id)
+update_record(catalog_id, record_id, fields)
+Замены в хендлерах:
+
+add_note_to_sheet() → bipium.create_record()
+get_notes_data() → bipium.get_records()
+delete_note_from_sheet() → bipium.delete_record()
+append_card_data() → bipium.create_record()
+Фаза 6: Секреты в .env
+Все переменные окружения:
+
+BOT_TOKEN=
+NOTIFICATION_CHAT_ID=
+COMBOX_URL=
+MISTRAL_API_KEY=
+TOGETHER_API_KEY=
+OPENROUTER_API_KEY=
+OPPER_API_KEY=
+OPENAI_API_KEY=
+GOOGLE_SERVICE_ACCOUNT_FILE=
+CALENDAR_ID=
+GOOGLE_SHEET_ID=
+GOOGLE_SHEET_CONTACTS_ID=
+TIME_ZONE=
+BIPIUM_API_KEY=
+BIPIUM_BASE_URL=
+BIPIUM_NOTES_CATALOG_ID=
+BIPIUM_CONTACTS_CATALOG_ID=
+
+config.py — валидация при старте: если переменная не задана → raise ValueError
+
+Фаза 7: Интеграция уведомлений
+calendar_notify.py + notes_notify.py → единый notifications/scheduler.py
+BlockingScheduler → AsyncIOScheduler в event loop aiogram
+Общий Bot-инстанс, chat_id из .env
+Порядок выполнения
+Шаг	Фаза	Зависит от	Риск
+1	Фаза 0 — секреты, .gitignore	—	Критический
+2	Фаза 6 — config.py, .env	Фаза 0	Средний
+3	Фаза 2 — BaseLLM	Фаза 6	Средний
+4	Фаза 3 — разбиение common.py	Фаза 2	Средний
+5	Фаза 4 — удаление ~Юрист	Фаза 3	Низкий
+6	Фаза 5 — Бипиум API	Фаза 3	Высокий (новый API)
+7	Фаза 7 — уведомления	Фаза 6	Низкий
+Не могу запушить через git push (ошибка 403) и через GitHub MCP тоже не получилось. Коммит создан локально на ветке claude/refactor-bot-cleanup-5LoVC — содержит .gitignore и REFACTORING_PLAN.md.
+
+Чтобы запушить вручную:
+
+git push -u origin claude/refactor-bot-cleanup-5LoVC
+
+План я вывел в чат выше — можете скопировать.
